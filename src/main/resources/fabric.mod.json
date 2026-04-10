@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "famiglia",
+  "version": "1.0.0",
+  "name": "Famiglia Mod",
+  "description": "Gestisci la tua famiglia nel roleplay mafioso.",
+  "authors": ["TuoNome"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": ["com.famiglia.mod.FamigliaMod"],
+    "client": ["com.famiglia.mod.client.FamigliaClientMod"]
+  },
+  "mixins": [],
+  "depends": {
+    "fabricloader": ">=0.14.0",
+    "fabric-api": "*",
+    "minecraft": "~1.20",
+    "java": ">=17"
+  }
+}
