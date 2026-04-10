@@ -103,7 +103,7 @@ public class FamigliaScreen extends Screen {
         }
 
         // ── Close button ─────────────────────────────────────────────────────
-        addDrawableChild(ButtonWidget.builder(Text.literal("✖"), btn -> onClose())
+        addDrawableChild(ButtonWidget.builder(Text.literal("✖"), btn -> close())
                 .dimensions(px + W - 14, py + 1, 12, 12).build());
 
         if      (tab == 0) initTab0();
