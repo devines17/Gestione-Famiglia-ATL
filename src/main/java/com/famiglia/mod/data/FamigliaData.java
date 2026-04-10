@@ -3,53 +3,62 @@ package com.famiglia.mod.data;
 import com.famiglia.mod.FamigliaMod;
 import com.famiglia.mod.gui.FamigliaScreen;
 import com.google.gson.*;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 
+import java.io.*;
+import java.nio.file.*;
+import java.security.SecureRandom;
 import java.util.*;
 
 /**
- * Cache lato client dei dati della famiglia.
- * Riceve gli aggiornamenti dal server tramite pacchetti S2C.
+ * Gestione dati della famiglia - completamente client-side.
+ * Salva e carica da config/famiglia/famiglia_data.json
  */
 public class FamigliaData {
 
     private static FamigliaData instance;
 
-    // ── Family state ──────────────────────────────────────────────────────────
+    // -- Family state --------------------------------------------------------
     private boolean inFamily = false;
     private String familyId = "";
     private String familyName = "La Famiglia";
     private String inviteCode = "";
-    private UUID creatorUuid = null;
 
     private List<ClientMember> membri = new ArrayList<>();
     private List<RuoloCustom> ruoli = new ArrayList<>();
 
-    // ── Error / notification state ────────────────────────────────────────────
+    // -- Error state ---------------------------------------------------------
     private String lastError = "";
     private long lastErrorTime = 0;
 
-    private FamigliaData() {}
+    // -- Local persistence ---------------------------------------------------
+    private final Path configDir;
+    private final Path savePath;
+
+    private FamigliaData() {
+        configDir = FabricLoader.getInstance().getConfigDir().resolve("famiglia");
+        savePath  = configDir.resolve("famiglia_data.json");
+        try { Files.createDirectories(configDir); } catch (Exception ignored) {}
+    }
 
     public static synchronized FamigliaData getInstance() {
         if (instance == null) instance = new FamigliaData();
         return instance;
     }
 
-    // ── Getters ───────────────────────────────────────────────────────────────
+    // -- Getters -------------------------------------------------------------
 
     public boolean isInFamily()              { return inFamily; }
     public String getFamilyId()              { return familyId; }
     public String getNomeFamiglia()          { return familyName; }
     public String getInviteCode()            { return inviteCode; }
-    public UUID getCreatorUuid()             { return creatorUuid; }
     public List<ClientMember> getMembri()    { return membri; }
     public List<RuoloCustom> getRuoli()      { return ruoli; }
 
+    /** In local mode il creatore e' sempre il giocatore locale. */
     public boolean isCreator() {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null || creatorUuid == null) return false;
-        return client.player.getUuid().equals(creatorUuid);
+        return inFamily;
     }
 
     public String getLastError() {
@@ -57,64 +66,238 @@ public class FamigliaData {
         return lastError;
     }
 
-    // ── Reset (on server join / disconnect) ───────────────────────────────────
+    public void setError(String msg) {
+        lastError = msg;
+        lastErrorTime = System.currentTimeMillis();
+    }
 
+    // -- Init ----------------------------------------------------------------
+
+    /** Carica i dati locali all'apertura della GUI. */
+    public void initLocal() {
+        caricaLocale();
+    }
+
+    /** Reset dati (es. quando si cambia server). */
     public void reset() {
+        // In local mode non facciamo reset perche' i dati sono persistenti
+        // Ricarichiamo dal file
+        caricaLocale();
+    }
+
+    // ========================================================================
+    // AZIONI LOCALI
+    // ========================================================================
+
+    /** Crea una nuova famiglia. */
+    public void createFamily(String name) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        String playerName = client.player != null
+                ? client.player.getName().getString() : "Boss";
+
+        inFamily = true;
+        familyId = UUID.randomUUID().toString();
+        familyName = name;
+        inviteCode = generateInviteCode();
+
+        ruoli = RuoloCustom.defaults();
+
+        membri.clear();
+        ClientMember me = new ClientMember();
+        me.playerName = playerName;
+        me.ruoloIndex = 0; // Boss
+        me.stato = Membro.Stato.ONLINE;
+        me.nota = "";
+        me.dataIngresso = System.currentTimeMillis();
+        membri.add(me);
+
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Unisciti a una famiglia con codice invito (locale - per RP). */
+    public void joinFamily(String code) {
+        // In local mode, "unirsi" significa creare una famiglia con quel codice
+        // come se fosse gia' stata condivisa
+        MinecraftClient client = MinecraftClient.getInstance();
+        String playerName = client.player != null
+                ? client.player.getName().getString() : "Membro";
+
+        inFamily = true;
+        familyId = UUID.randomUUID().toString();
+        familyName = "Famiglia (" + code + ")";
+        inviteCode = code;
+
+        ruoli = RuoloCustom.defaults();
+
+        membri.clear();
+        ClientMember me = new ClientMember();
+        me.playerName = playerName;
+        me.ruoloIndex = 0;
+        me.stato = Membro.Stato.ONLINE;
+        me.nota = "";
+        me.dataIngresso = System.currentTimeMillis();
+        membri.add(me);
+
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Aggiungi un membro manualmente. */
+    public void addMember(String nome, int ruoloIndex) {
+        if (!inFamily) return;
+        ClientMember m = new ClientMember();
+        m.playerName = nome;
+        m.ruoloIndex = Math.min(ruoloIndex, Math.max(0, ruoli.size() - 1));
+        m.stato = Membro.Stato.OFFLINE;
+        m.nota = "";
+        m.dataIngresso = System.currentTimeMillis();
+        membri.add(m);
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Rimuovi un membro. */
+    public void kickMember(int index) {
+        if (index < 0 || index >= membri.size()) return;
+        membri.remove(index);
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Aggiorna il ruolo di un membro. */
+    public void updateMemberRole(int memberIndex, int ruoloIndex) {
+        if (memberIndex < 0 || memberIndex >= membri.size()) return;
+        membri.get(memberIndex).ruoloIndex = Math.min(ruoloIndex, Math.max(0, ruoli.size() - 1));
+        salvaLocale();
+    }
+
+    /** Aggiorna lo stato di un membro. */
+    public void updateMemberStato(int memberIndex, Membro.Stato stato) {
+        if (memberIndex < 0 || memberIndex >= membri.size()) return;
+        membri.get(memberIndex).stato = stato;
+        salvaLocale();
+    }
+
+    /** Aggiorna la nota di un membro. */
+    public void updateMemberNota(int memberIndex, String nota) {
+        if (memberIndex < 0 || memberIndex >= membri.size()) return;
+        membri.get(memberIndex).nota = nota;
+        salvaLocale();
+    }
+
+    /** Aggiungi un ruolo. */
+    public void addRuolo(String nome, String emoji, int colore) {
+        ruoli.add(new RuoloCustom(nome, emoji, colore));
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Modifica un ruolo. */
+    public void editRuolo(int index, String nome, String emoji, int colore) {
+        if (index < 0 || index >= ruoli.size()) return;
+        RuoloCustom r = ruoli.get(index);
+        r.setNome(nome);
+        r.setEmoji(emoji);
+        r.setColore(colore);
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Rimuovi un ruolo (non permette di cancellare l'ultimo). */
+    public boolean removeRuolo(int index) {
+        if (ruoli.size() <= 1) return false;
+        if (index < 0 || index >= ruoli.size()) return false;
+        for (ClientMember m : membri) {
+            if (m.ruoloIndex == index) {
+                m.ruoloIndex = 0;
+            } else if (m.ruoloIndex > index) {
+                m.ruoloIndex--;
+            }
+        }
+        ruoli.remove(index);
+        salvaLocale();
+        refreshScreen();
+        return true;
+    }
+
+    /** Aggiorna il nome della famiglia. */
+    public void updateFamilyName(String name) {
+        familyName = name;
+        salvaLocale();
+    }
+
+    /** Rigenera il codice invito. */
+    public void regenInviteCode() {
+        inviteCode = generateInviteCode();
+        salvaLocale();
+        refreshScreen();
+    }
+
+    /** Lascia la famiglia (cancella tutto). */
+    public void leaveFamily() {
         inFamily = false;
         familyId = "";
         familyName = "La Famiglia";
         inviteCode = "";
-        creatorUuid = null;
         membri.clear();
         ruoli.clear();
-        lastError = "";
+        try { Files.deleteIfExists(savePath); } catch (Exception ignored) {}
+        refreshScreen();
     }
 
-    // ── Handle S2C packets ────────────────────────────────────────────────────
+    // ========================================================================
+    // PERSISTENZA LOCALE
+    // ========================================================================
 
-    public void handleS2C(String action, String jsonData) {
+    public void salvaLocale() {
         try {
-            switch (action) {
-                case "full_sync" -> handleFullSync(jsonData);
-                case "no_family" -> {
-                    inFamily = false;
-                    familyId = "";
-                    familyName = "La Famiglia";
-                    inviteCode = "";
-                    creatorUuid = null;
-                    membri.clear();
-                    ruoli.clear();
-                    refreshScreen();
-                }
-                case "invite_code" -> {
-                    JsonObject json = JsonParser.parseString(jsonData).getAsJsonObject();
-                    inviteCode = json.get("code").getAsString();
-                    refreshScreen();
-                }
-                case "error" -> {
-                    JsonObject json = JsonParser.parseString(jsonData).getAsJsonObject();
-                    lastError = json.get("message").getAsString();
-                    lastErrorTime = System.currentTimeMillis();
-                    refreshScreen();
-                }
-                default -> FamigliaMod.LOGGER.warn("Azione S2C sconosciuta: {}", action);
+            JsonObject root = new JsonObject();
+            root.addProperty("familyId", familyId);
+            root.addProperty("familyName", familyName);
+            root.addProperty("inviteCode", inviteCode);
+
+            JsonArray ra = new JsonArray();
+            for (RuoloCustom r : ruoli) {
+                JsonObject ro = new JsonObject();
+                ro.addProperty("nome", r.getNome());
+                ro.addProperty("emoji", r.getEmoji());
+                ro.addProperty("colore", r.getColore());
+                ra.add(ro);
             }
+            root.add("ruoli", ra);
+
+            JsonArray ma = new JsonArray();
+            for (ClientMember m : membri) {
+                JsonObject mo = new JsonObject();
+                mo.addProperty("playerName", m.playerName);
+                mo.addProperty("ruoloIndex", m.ruoloIndex);
+                mo.addProperty("stato", m.stato.name());
+                mo.addProperty("nota", m.nota);
+                mo.addProperty("dataIngresso", m.dataIngresso);
+                ma.add(mo);
+            }
+            root.add("membri", ma);
+
+            Files.createDirectories(configDir);
+            Path tmpPath = configDir.resolve("famiglia_data.json.tmp");
+            try (Writer w = new FileWriter(tmpPath.toFile())) {
+                new GsonBuilder().setPrettyPrinting().create().toJson(root, w);
+            }
+            Files.move(tmpPath, savePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (Exception e) {
-            FamigliaMod.LOGGER.error("Errore gestione S2C: {} - {}", action, e.getMessage());
+            FamigliaMod.LOGGER.error("Errore salvataggio locale famiglia", e);
         }
     }
 
-    private void handleFullSync(String jsonData) {
-        try {
-            JsonObject root = JsonParser.parseString(jsonData).getAsJsonObject();
-
-            inFamily = true;
-            familyId = root.get("id").getAsString();
-            familyName = root.get("name").getAsString();
+    public void caricaLocale() {
+        if (!Files.exists(savePath)) return;
+        try (Reader r = new FileReader(savePath.toFile())) {
+            JsonObject root = JsonParser.parseReader(r).getAsJsonObject();
+            familyId = root.has("familyId") ? root.get("familyId").getAsString() : "";
+            familyName = root.has("familyName") ? root.get("familyName").getAsString() : "La Famiglia";
             inviteCode = root.has("inviteCode") ? root.get("inviteCode").getAsString() : "";
-            creatorUuid = UUID.fromString(root.get("creatorUuid").getAsString());
 
-            // Parse ruoli
             ruoli.clear();
             if (root.has("ruoli")) {
                 for (JsonElement el : root.getAsJsonArray("ruoli")) {
@@ -125,37 +308,36 @@ public class FamigliaData {
                                 ro.get("emoji").getAsString(),
                                 ro.get("colore").getAsInt()));
                     } catch (Exception e) {
-                        FamigliaMod.LOGGER.warn("Ruolo corrotto nel sync, ignorato", e);
+                        FamigliaMod.LOGGER.warn("Ruolo corrotto locale, ignorato", e);
                     }
                 }
             }
             if (ruoli.isEmpty()) ruoli = RuoloCustom.defaults();
 
-            // Parse membri
             membri.clear();
             if (root.has("membri")) {
                 for (JsonElement el : root.getAsJsonArray("membri")) {
                     try {
                         JsonObject mo = el.getAsJsonObject();
                         ClientMember m = new ClientMember();
-                        m.playerUuid = UUID.fromString(mo.get("uuid").getAsString());
                         m.playerName = mo.get("playerName").getAsString();
                         m.ruoloIndex = mo.get("ruoloIndex").getAsInt();
                         m.stato = Membro.Stato.valueOf(mo.get("stato").getAsString());
                         m.nota = mo.has("nota") ? mo.get("nota").getAsString() : "";
                         m.dataIngresso = mo.has("dataIngresso") ? mo.get("dataIngresso").getAsLong() : 0;
-                        // Clamp ruoloIndex
                         m.ruoloIndex = Math.min(m.ruoloIndex, Math.max(0, ruoli.size() - 1));
                         membri.add(m);
                     } catch (Exception e) {
-                        FamigliaMod.LOGGER.warn("Membro corrotto nel sync, ignorato", e);
+                        FamigliaMod.LOGGER.warn("Membro corrotto locale, ignorato", e);
                     }
                 }
             }
 
-            refreshScreen();
+            if (!familyId.isEmpty()) {
+                inFamily = true;
+            }
         } catch (Exception e) {
-            FamigliaMod.LOGGER.error("Errore parsing full_sync", e);
+            FamigliaMod.LOGGER.error("Errore caricamento locale famiglia", e);
         }
     }
 
@@ -166,10 +348,17 @@ public class FamigliaData {
         }
     }
 
-    // ── Client member data class ──────────────────────────────────────────────
+    private String generateInviteCode() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        SecureRandom rng = new SecureRandom();
+        StringBuilder sb = new StringBuilder(6);
+        for (int i = 0; i < 6; i++) sb.append(chars.charAt(rng.nextInt(chars.length())));
+        return sb.toString();
+    }
+
+    // -- Client member data class --------------------------------------------
 
     public static class ClientMember {
-        public UUID playerUuid;
         public String playerName;
         public int ruoloIndex;
         public Membro.Stato stato;

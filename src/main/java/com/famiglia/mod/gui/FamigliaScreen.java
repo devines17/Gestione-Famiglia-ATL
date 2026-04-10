@@ -4,9 +4,6 @@ import com.famiglia.mod.client.FamigliaClientMod;
 import com.famiglia.mod.data.FamigliaData;
 import com.famiglia.mod.data.Membro;
 import com.famiglia.mod.data.RuoloCustom;
-import com.famiglia.mod.network.FamigliaC2SPayload;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
@@ -14,17 +11,16 @@ import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.Text;
 
 import java.util.List;
-import java.util.UUID;
 
 /**
- * GUI principale della Famiglia - versione multiplayer.
+ * GUI principale della Famiglia - versione client-side.
  *
  * Se il giocatore NON e' in una famiglia:
  *   Mostra schermata "Crea Famiglia" / "Unisciti con codice"
  *
  * Se il giocatore E' in una famiglia:
- *   TAB 0 - Membri   : lista live con stati in tempo reale
- *   TAB 1 - Ruoli    : gestione ruoli (solo Boss)
+ *   TAB 0 - Membri   : lista con gestione completa
+ *   TAB 1 - Ruoli    : gestione ruoli
  *   TAB 2 - Profilo  : nome famiglia, codice invito, lascia famiglia
  */
 public class FamigliaScreen extends Screen {
@@ -65,7 +61,7 @@ public class FamigliaScreen extends Screen {
     private int tab = 0;
     private int px, py;
 
-    // -- Welcome screen (no family) --------------------------------------------
+    // -- Welcome screen --------------------------------------------------------
     private enum WelcomeMode { NONE, CREATE, JOIN }
     private WelcomeMode welcomeMode = WelcomeMode.NONE;
     private TextFieldWidget welcomeField;
@@ -74,6 +70,10 @@ public class FamigliaScreen extends Screen {
     private int     membriSel    = -1;
     private int     membriScroll = 0;
     private boolean membriEdit   = false;
+    private boolean membriAdd    = false;
+
+    private TextFieldWidget addNomeField;
+    private int             addRuoloIdx   = 0;
 
     private TextFieldWidget editNotaField;
     private int             editRuoloIdx  = 0;
@@ -98,7 +98,7 @@ public class FamigliaScreen extends Screen {
         super(Text.literal("Famiglia"));
     }
 
-    /** Chiamato dal client quando arrivano dati dal server. */
+    /** Chiamato quando i dati vengono aggiornati. */
     public void onDataUpdated() {
         clearChildren();
         init();
@@ -122,7 +122,7 @@ public class FamigliaScreen extends Screen {
             final int fi = i;
             addDrawableChild(ButtonWidget.builder(Text.literal(tabNames[i]), btn -> {
                 tab = fi;
-                membriEdit = ruoliAdd = ruoliEdit = false;
+                membriAdd = membriEdit = ruoliAdd = ruoliEdit = false;
                 clearChildren(); init();
             }).dimensions(px + i * tabW, py + HEADER_H, tabW, 16).build());
         }
@@ -155,8 +155,7 @@ public class FamigliaScreen extends Screen {
             addDrawableChild(ButtonWidget.builder(Text.literal("Crea!"), btn -> {
                 String name = welcomeField.getText().trim();
                 if (name.isEmpty()) name = "La Famiglia";
-                sendC2S("create_family", "{\"name\":\"" + escapeJson(name) + "\"}");
-                welcomeMode = WelcomeMode.NONE;
+                data.createFamily(name);
             }).dimensions(px + PAD, py + 140, 100, 16).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Indietro"), btn -> {
@@ -171,11 +170,10 @@ public class FamigliaScreen extends Screen {
             addDrawableChild(welcomeField);
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Unisciti!"), btn -> {
-                String code = welcomeField.getText().trim();
+                String code = welcomeField.getText().trim().toUpperCase();
                 if (!code.isEmpty()) {
-                    sendC2S("join_family", "{\"code\":\"" + escapeJson(code) + "\"}");
+                    data.joinFamily(code);
                 }
-                welcomeMode = WelcomeMode.NONE;
             }).dimensions(px + PAD, py + 140, 100, 16).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Indietro"), btn -> {
@@ -205,22 +203,43 @@ public class FamigliaScreen extends Screen {
         int bodyY = py + HEADER_H + TAB_H + 4;
         int btnY  = py + H - 22;
 
+        // -- Add member form --------------------------------------------------
+        if (membriAdd) {
+            addNomeField = new TextFieldWidget(textRenderer,
+                    px + PAD, bodyY + 22, W - PAD * 2, 16, Text.literal("nome"));
+            addNomeField.setPlaceholder(Text.literal("Nome del membro..."));
+            addNomeField.setMaxLength(28);
+            addDrawableChild(addNomeField);
+
+            cycleButton(px + PAD,          bodyY + 50, "<", () -> {
+                int n = data.getRuoli().size(); if (n > 0) addRuoloIdx = (addRuoloIdx - 1 + n) % n; });
+            cycleButton(px + W - PAD - 16, bodyY + 50, ">", () -> {
+                int n = data.getRuoli().size(); if (n > 0) addRuoloIdx = (addRuoloIdx + 1) % n; });
+
+            confirmCancel(btnY,
+                () -> {
+                    String nome = addNomeField.getText().trim();
+                    if (!nome.isEmpty() && !data.getRuoli().isEmpty()) {
+                        addRuoloIdx = Math.min(addRuoloIdx, data.getRuoli().size() - 1);
+                        data.addMember(nome, addRuoloIdx);
+                    }
+                    membriAdd = false; clearChildren(); init();
+                },
+                () -> { membriAdd = false; clearChildren(); init(); });
+            return;
+        }
+
+        // -- Edit member form -------------------------------------------------
         if (membriEdit && membriSel >= 0 && membriSel < data.getMembri().size()) {
             FamigliaData.ClientMember m = data.getMembri().get(membriSel);
             int fy = bodyY + 8;
 
-            if (data.isCreator()) {
-                cycleButton(px + PAD,          fy,      "<", () -> { int n = data.getRuoli().size(); if (n > 0) editRuoloIdx = (editRuoloIdx - 1 + n) % n; });
-                cycleButton(px + W - PAD - 16, fy,      ">", () -> { int n = data.getRuoli().size(); if (n > 0) editRuoloIdx = (editRuoloIdx + 1) % n; });
-            }
+            cycleButton(px + PAD,          fy,      "<", () -> { int n = data.getRuoli().size(); if (n > 0) editRuoloIdx = (editRuoloIdx - 1 + n) % n; });
+            cycleButton(px + W - PAD - 16, fy,      ">", () -> { int n = data.getRuoli().size(); if (n > 0) editRuoloIdx = (editRuoloIdx + 1) % n; });
 
-            UUID myUuid = MinecraftClient.getInstance().player != null
-                    ? MinecraftClient.getInstance().player.getUuid() : null;
-            if (m.playerUuid.equals(myUuid)) {
-                int nStati = Membro.Stato.values().length;
-                cycleButton(px + PAD,          fy + 24, "<", () -> editStatoIdx = (editStatoIdx - 1 + nStati) % nStati);
-                cycleButton(px + W - PAD - 16, fy + 24, ">", () -> editStatoIdx = (editStatoIdx + 1) % nStati);
-            }
+            int nStati = Membro.Stato.values().length;
+            cycleButton(px + PAD,          fy + 24, "<", () -> editStatoIdx = (editStatoIdx - 1 + nStati) % nStati);
+            cycleButton(px + W - PAD - 16, fy + 24, ">", () -> editStatoIdx = (editStatoIdx + 1) % nStati);
 
             editNotaField = new TextFieldWidget(textRenderer,
                     px + PAD, fy + 52, W - PAD * 2, 16, Text.literal("nota"));
@@ -230,27 +249,26 @@ public class FamigliaScreen extends Screen {
 
             confirmCancel(btnY,
                 () -> {
-                    FamigliaData.ClientMember cm = data.getMembri().get(membriSel);
-                    if (data.isCreator()) {
+                    if (membriSel >= 0 && membriSel < data.getMembri().size()) {
                         int ri = Math.min(editRuoloIdx, data.getRuoli().size() - 1);
-                        sendC2S("update_member_role", "{\"targetUuid\":\"" + cm.playerUuid + "\",\"ruoloIndex\":" + ri + "}");
-                    }
-                    UUID my = MinecraftClient.getInstance().player != null
-                            ? MinecraftClient.getInstance().player.getUuid() : null;
-                    if (cm.playerUuid.equals(my)) {
+                        data.updateMemberRole(membriSel, ri);
                         int si = Math.min(editStatoIdx, Membro.Stato.values().length - 1);
-                        sendC2S("update_status", "{\"status\":\"" + Membro.Stato.values()[si].name() + "\"}");
+                        data.updateMemberStato(membriSel, Membro.Stato.values()[si]);
+                        data.updateMemberNota(membriSel, editNotaField.getText().trim());
                     }
-                    String nota = editNotaField.getText().trim();
-                    sendC2S("update_nota", "{\"targetUuid\":\"" + cm.playerUuid + "\",\"nota\":\"" + escapeJson(nota) + "\"}");
                     membriEdit = false; clearChildren(); init();
                 },
                 () -> { membriEdit = false; clearChildren(); init(); });
             return;
         }
 
-        int bw = 72, gap = 6, total = bw * 2 + gap;
+        // -- Bottom buttons ---------------------------------------------------
+        int bw = 72, gap = 6, total = bw * 3 + gap * 2;
         int bx = px + (W - total) / 2;
+
+        addDrawableChild(ButtonWidget.builder(Text.literal("+ Aggiungi"), btn -> {
+            membriAdd = true; addRuoloIdx = 0; clearChildren(); init();
+        }).dimensions(bx, btnY, bw, 16).build());
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Modifica"), btn -> {
             if (membriSel >= 0 && membriSel < data.getMembri().size()) {
@@ -259,21 +277,16 @@ public class FamigliaScreen extends Screen {
                 editStatoIdx = m.stato.ordinal();
                 membriEdit = true; clearChildren(); init();
             }
-        }).dimensions(bx, btnY, bw, 16).build());
+        }).dimensions(bx + bw + gap, btnY, bw, 16).build());
 
-        if (data.isCreator()) {
-            addDrawableChild(ButtonWidget.builder(Text.literal("Espelli"), btn -> {
-                if (membriSel >= 0 && membriSel < data.getMembri().size()) {
-                    FamigliaData.ClientMember m = data.getMembri().get(membriSel);
-                    UUID myUuid = MinecraftClient.getInstance().player != null
-                            ? MinecraftClient.getInstance().player.getUuid() : null;
-                    if (!m.playerUuid.equals(myUuid)) {
-                        sendC2S("kick_member", "{\"targetUuid\":\"" + m.playerUuid + "\"}");
-                        membriSel = -1;
-                    }
-                }
-            }).dimensions(bx + bw + gap, btnY, bw, 16).build());
-        }
+        addDrawableChild(ButtonWidget.builder(Text.literal("Rimuovi"), btn -> {
+            if (membriSel >= 0 && membriSel < data.getMembri().size()) {
+                data.kickMember(membriSel);
+                membriSel = -1;
+                membriScroll = Math.max(0, Math.min(membriScroll, Math.max(0, data.getMembri().size() - VR)));
+                clearChildren(); init();
+            }
+        }).dimensions(bx + (bw + gap) * 2, btnY, bw, 16).build());
     }
 
     // ==========================================================================
@@ -283,8 +296,6 @@ public class FamigliaScreen extends Screen {
     private void initTab1() {
         int bodyY = py + HEADER_H + TAB_H + 4;
         int btnY  = py + H - 22;
-
-        if (!data.isCreator()) return;
 
         if (ruoliAdd || (ruoliEdit && ruoliSel >= 0 && ruoliSel < data.getRuoli().size())) {
             int fy = bodyY + 20;
@@ -325,14 +336,9 @@ public class FamigliaScreen extends Screen {
                     if (emoji.isEmpty()) emoji = "*";
 
                     if (ruoliEdit) {
-                        sendC2S("edit_ruolo", "{\"index\":" + ruoliSel
-                                + ",\"nome\":\"" + escapeJson(nome)
-                                + "\",\"emoji\":\"" + escapeJson(emoji)
-                                + "\",\"colore\":" + colore + "}");
+                        data.editRuolo(ruoliSel, nome, emoji, colore);
                     } else {
-                        sendC2S("add_ruolo", "{\"nome\":\"" + escapeJson(nome)
-                                + "\",\"emoji\":\"" + escapeJson(emoji)
-                                + "\",\"colore\":" + colore + "}");
+                        data.addRuolo(nome, emoji, colore);
                     }
                     ruoliAdd = ruoliEdit = false; clearChildren(); init();
                 },
@@ -355,7 +361,7 @@ public class FamigliaScreen extends Screen {
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Elimina"), btn -> {
             if (ruoliSel >= 0 && ruoliSel < data.getRuoli().size()) {
-                sendC2S("remove_ruolo", "{\"index\":" + ruoliSel + "}");
+                data.removeRuolo(ruoliSel);
                 ruoliSel = -1;
             }
         }).dimensions(bx + (bw + gap) * 2, btnY, bw, 16).build());
@@ -368,41 +374,25 @@ public class FamigliaScreen extends Screen {
     private void initTab2() {
         int bodyY = py + HEADER_H + TAB_H + 4;
 
-        if (data.isCreator()) {
-            famNomeField = new TextFieldWidget(textRenderer,
-                    px + PAD, bodyY + 16, W - PAD * 2, 16, Text.literal("nome famiglia"));
-            famNomeField.setText(data.getNomeFamiglia());
-            famNomeField.setMaxLength(32);
-            addDrawableChild(famNomeField);
+        famNomeField = new TextFieldWidget(textRenderer,
+                px + PAD, bodyY + 16, W - PAD * 2, 16, Text.literal("nome famiglia"));
+        famNomeField.setText(data.getNomeFamiglia());
+        famNomeField.setMaxLength(32);
+        addDrawableChild(famNomeField);
 
-            addDrawableChild(ButtonWidget.builder(Text.literal("Salva Nome"), btn -> {
-                String name = famNomeField.getText().trim();
-                if (name.isEmpty()) name = "La Famiglia";
-                sendC2S("update_family_name", "{\"name\":\"" + escapeJson(name) + "\"}");
-            }).dimensions(px + W - PAD - 90, bodyY + 36, 90, 16).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Salva Nome"), btn -> {
+            String name = famNomeField.getText().trim();
+            if (name.isEmpty()) name = "La Famiglia";
+            data.updateFamilyName(name);
+        }).dimensions(px + W - PAD - 90, bodyY + 36, 90, 16).build());
 
-            addDrawableChild(ButtonWidget.builder(Text.literal("Rigenera Codice"), btn -> {
-                sendC2S("regen_invite_code", "{}");
-            }).dimensions(px + PAD, bodyY + 80, 120, 16).build());
-        }
+        addDrawableChild(ButtonWidget.builder(Text.literal("Rigenera Codice"), btn -> {
+            data.regenInviteCode();
+        }).dimensions(px + PAD, bodyY + 80, 120, 16).build());
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Lascia Famiglia"), btn -> {
-            sendC2S("leave_family", "{}");
+            data.leaveFamily();
         }).dimensions(px + PAD, py + H - 22, 120, 16).build());
-
-        addDrawableChild(ButtonWidget.builder(Text.literal("Cambia Stato"), btn -> {
-            UUID myUuid = MinecraftClient.getInstance().player != null
-                    ? MinecraftClient.getInstance().player.getUuid() : null;
-            if (myUuid != null) {
-                for (FamigliaData.ClientMember m : data.getMembri()) {
-                    if (m.playerUuid.equals(myUuid)) {
-                        int next = (m.stato.ordinal() + 1) % Membro.Stato.values().length;
-                        sendC2S("update_status", "{\"status\":\"" + Membro.Stato.values()[next].name() + "\"}");
-                        break;
-                    }
-                }
-            }
-        }).dimensions(px + W - PAD - 120, py + H - 22, 120, 16).build());
     }
 
     // ==========================================================================
@@ -421,11 +411,13 @@ public class FamigliaScreen extends Screen {
             return;
         }
 
+        // -- Header --
         ctx.fill(px, py, px + W, py + HEADER_H, C_HEADER);
         border(ctx, px, py, W, HEADER_H, C_BORDER, 1);
         String title = "* " + data.getNomeFamiglia().toUpperCase() + " *";
         ctx.drawCenteredTextWithShadow(textRenderer, Text.literal(title), px + W / 2, py + 7, C_GOLD);
 
+        // -- Tab highlights --
         int tabW = W / 3;
         for (int i = 0; i < 3; i++) {
             int tx = px + i * tabW;
@@ -434,10 +426,12 @@ public class FamigliaScreen extends Screen {
         }
         ctx.fill(px, py + HEADER_H + 16, px + W, py + HEADER_H + 17, C_DIVIDER);
 
+        // -- Tab content --
         if      (tab == 0) renderTab0(ctx, mouseX, mouseY);
         else if (tab == 1) renderTab1(ctx, mouseX, mouseY);
         else               renderTab2(ctx);
 
+        // -- Footer --
         String hint = "[" + FamigliaClientMod.openFamigliaKey.getBoundKeyLocalizedText().getString() + "] chiudi";
         ctx.drawText(textRenderer, Text.literal(hint),
                 px + W - textRenderer.getWidth(hint) - 6, py + H - 10, C_DIM, false);
@@ -493,6 +487,24 @@ public class FamigliaScreen extends Screen {
     private void renderTab0(DrawContext ctx, int mx, int my) {
         int bodyY = py + HEADER_H + TAB_H + 4;
 
+        // -- Add member form rendering --
+        if (membriAdd) {
+            ctx.fill(px + 4, bodyY - 2, px + W - 4, bodyY + 72, C_FORM_BG);
+            border(ctx, px + 4, bodyY - 2, W - 8, 74, C_BORDER, 1);
+            ctx.drawText(textRenderer, Text.literal(">> NUOVO MEMBRO"), px + PAD, bodyY + 2, C_GOLD, true);
+            ctx.drawText(textRenderer, Text.literal("Nome:"), px + PAD, bodyY + 14, C_DIM, false);
+            List<RuoloCustom> r = data.getRuoli();
+            if (!r.isEmpty()) {
+                int idx = Math.min(addRuoloIdx, r.size() - 1);
+                RuoloCustom rc = r.get(idx);
+                ctx.drawText(textRenderer, Text.literal("Ruolo:"), px + PAD + 20, bodyY + 42, C_DIM, false);
+                ctx.drawCenteredTextWithShadow(textRenderer,
+                        Text.literal(rc.getEtichetta()).withColor(rc.getColore()), px + W / 2, bodyY + 42, 0xFFFFFFFF);
+            }
+            return;
+        }
+
+        // -- Edit member form rendering --
         if (membriEdit && membriSel >= 0 && membriSel < data.getMembri().size()) {
             FamigliaData.ClientMember m = data.getMembri().get(membriSel);
             ctx.fill(px + 4, bodyY - 2, px + W - 4, bodyY + 86, C_FORM_BG);
@@ -501,42 +513,33 @@ public class FamigliaScreen extends Screen {
                     px + PAD, bodyY + 2, C_GOLD, true);
 
             List<RuoloCustom> r = data.getRuoli();
-            if (!r.isEmpty() && data.isCreator()) {
+            if (!r.isEmpty()) {
                 int idx = Math.min(editRuoloIdx, r.size() - 1);
                 RuoloCustom rc = r.get(idx);
                 ctx.drawText(textRenderer, Text.literal("Ruolo:"), px + PAD + 20, bodyY + 10, C_DIM, false);
                 ctx.drawCenteredTextWithShadow(textRenderer,
                         Text.literal(rc.getEtichetta()).withColor(rc.getColore()), px + W / 2, bodyY + 10, 0xFFFFFFFF);
-            } else if (!r.isEmpty()) {
-                int idx = Math.min(m.ruoloIndex, r.size() - 1);
-                RuoloCustom rc = r.get(idx);
-                ctx.drawText(textRenderer, Text.literal("Ruolo: " + rc.getEtichetta()),
-                        px + PAD, bodyY + 10, rc.getColore(), false);
             }
 
-            UUID myUuid = MinecraftClient.getInstance().player != null
-                    ? MinecraftClient.getInstance().player.getUuid() : null;
-            if (m.playerUuid.equals(myUuid)) {
-                int safeIdx = Math.min(editStatoIdx, Membro.Stato.values().length - 1);
-                Membro.Stato stato = Membro.Stato.values()[safeIdx];
-                ctx.drawText(textRenderer, Text.literal("Stato:"), px + PAD + 20, bodyY + 28, C_DIM, false);
-                ctx.drawCenteredTextWithShadow(textRenderer,
-                        Text.literal(stato.etichetta).withColor(stato.colore), px + W / 2, bodyY + 28, 0xFFFFFFFF);
-            } else {
-                ctx.drawText(textRenderer, Text.literal("Stato: " + m.stato.etichetta),
-                        px + PAD, bodyY + 28, m.stato.colore, false);
-            }
+            int safeIdx = Math.min(editStatoIdx, Membro.Stato.values().length - 1);
+            Membro.Stato stato = Membro.Stato.values()[safeIdx];
+            ctx.drawText(textRenderer, Text.literal("Stato:"), px + PAD + 20, bodyY + 28, C_DIM, false);
+            ctx.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal(stato.etichetta).withColor(stato.colore), px + W / 2, bodyY + 28, 0xFFFFFFFF);
+
             ctx.drawText(textRenderer, Text.literal("Nota:"), px + PAD, bodyY + 44, C_DIM, false);
             return;
         }
 
+        // -- Member list header --
         int hY = bodyY;
         ctx.fill(px + 2, hY, px + W - 2, hY + 12, 0xFF1E1600);
         border(ctx, px + 2, hY, W - 4, 12, 0xFF333333, 1);
-        ctx.drawText(textRenderer, Text.literal("GIOCATORE"), px + 8,   hY + 2, C_GOLD_DIM, false);
+        ctx.drawText(textRenderer, Text.literal("MEMBRO"),    px + 8,   hY + 2, C_GOLD_DIM, false);
         ctx.drawText(textRenderer, Text.literal("RUOLO"),     px + 140, hY + 2, C_GOLD_DIM, false);
         ctx.drawText(textRenderer, Text.literal("STATO"),     px + 245, hY + 2, C_GOLD_DIM, false);
 
+        // -- Member list --
         List<FamigliaData.ClientMember> ml = data.getMembri();
         int listY = hY + 13;
         int end   = Math.min(membriScroll + VR, ml.size());
@@ -569,37 +572,24 @@ public class FamigliaScreen extends Screen {
                 ctx.drawText(textRenderer, Text.literal("[N]"), px + W - 18, ry + 5, C_GOLD_DIM, false);
         }
 
+        // -- Scroll indicators --
         if (membriScroll > 0)
             ctx.drawText(textRenderer, Text.literal("^"), px + W - 12, listY + 2, C_GOLD_DIM, false);
         if (membriScroll + VR < ml.size())
             ctx.drawText(textRenderer, Text.literal("v"), px + W - 12, listY + VR * RH - RH + 2, C_GOLD_DIM, false);
 
+        // -- Stats bar --
         long active = ml.stream().filter(m -> m.stato != Membro.Stato.OFFLINE).count();
         ctx.fill(px + 2, py + H - 34, px + W - 2, py + H - 24, C_FORM_BG);
         ctx.drawText(textRenderer,
-                Text.literal("Totale: " + ml.size() + "  |  Online: " + active),
+                Text.literal("Totale: " + ml.size() + "  |  Attivi: " + active),
                 px + 8, py + H - 32, C_DIM, false);
     }
 
     private void renderTab1(DrawContext ctx, int mx, int my) {
         int bodyY = py + HEADER_H + TAB_H + 4;
 
-        if (!data.isCreator()) {
-            ctx.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("Solo il Boss puo gestire i ruoli."),
-                    px + W / 2, bodyY + 40, C_DIM);
-            List<RuoloCustom> rl = data.getRuoli();
-            int listY = bodyY + 60;
-            for (int i = 0; i < rl.size() && i < VR; i++) {
-                RuoloCustom r = rl.get(i);
-                int ry = listY + i * RH;
-                ctx.fill(px + 2, ry, px + W - 2, ry + RH - 1, i % 2 == 0 ? C_ROW_EVEN : C_ROW_ODD);
-                ctx.drawText(textRenderer, Text.literal(r.getEmoji()), px + 8, ry + 5, 0xFFFFFFFF, false);
-                ctx.drawText(textRenderer, Text.literal(r.getNome()).withColor(r.getColore()), px + 44, ry + 5, 0xFFFFFFFF, false);
-            }
-            return;
-        }
-
+        // -- Role form rendering --
         if (ruoliAdd || (ruoliEdit && ruoliSel >= 0 && ruoliSel < data.getRuoli().size())) {
             ctx.fill(px + 4, bodyY - 2, px + W - 4, bodyY + 60, C_FORM_BG);
             border(ctx, px + 4, bodyY - 2, W - 8, 62, C_BORDER, 1);
@@ -611,6 +601,7 @@ public class FamigliaScreen extends Screen {
             return;
         }
 
+        // -- Role list header --
         int hY = bodyY;
         ctx.fill(px + 2, hY, px + W - 2, hY + 12, 0xFF1E1600);
         border(ctx, px + 2, hY, W - 4, 12, 0xFF333333, 1);
@@ -618,6 +609,7 @@ public class FamigliaScreen extends Screen {
         ctx.drawText(textRenderer, Text.literal("NOME"),       px + 44,  hY + 2, C_GOLD_DIM, false);
         ctx.drawText(textRenderer, Text.literal("COLORE HEX"), px + 210, hY + 2, C_GOLD_DIM, false);
 
+        // -- Role list --
         List<RuoloCustom> rl = data.getRuoli();
         int listY = hY + 13;
         int end = Math.min(ruoliScroll + VR, rl.size());
@@ -641,11 +633,13 @@ public class FamigliaScreen extends Screen {
             border(ctx, px + W - 20, ry + 4, 12, RH - 9, 0xFF333333, 1);
         }
 
+        // -- Scroll indicators --
         if (ruoliScroll > 0)
             ctx.drawText(textRenderer, Text.literal("^"), px + W - 12, listY + 2, C_GOLD_DIM, false);
         if (ruoliScroll + VR < rl.size())
             ctx.drawText(textRenderer, Text.literal("v"), px + W - 12, listY + VR * RH - RH + 2, C_GOLD_DIM, false);
 
+        // -- Stats bar --
         ctx.fill(px + 2, py + H - 34, px + W - 2, py + H - 24, C_FORM_BG);
         ctx.drawText(textRenderer, Text.literal("Ruoli totali: " + rl.size()),
                 px + 8, py + H - 32, C_DIM, false);
@@ -656,12 +650,7 @@ public class FamigliaScreen extends Screen {
         ctx.fill(px + 4, bodyY - 2, px + W - 4, bodyY + 130, C_FORM_BG);
         border(ctx, px + 4, bodyY - 2, W - 8, 132, C_BORDER, 1);
 
-        if (data.isCreator()) {
-            ctx.drawText(textRenderer, Text.literal(">> Nome famiglia:"), px + PAD, bodyY + 4, C_GOLD, true);
-        } else {
-            ctx.drawText(textRenderer, Text.literal("Famiglia: " + data.getNomeFamiglia()),
-                    px + PAD, bodyY + 4, C_GOLD, true);
-        }
+        ctx.drawText(textRenderer, Text.literal(">> Nome famiglia:"), px + PAD, bodyY + 4, C_GOLD, true);
 
         ctx.drawText(textRenderer, Text.literal(">> Codice Invito:"), px + PAD, bodyY + 55, C_GOLD, true);
         String code = data.getInviteCode().isEmpty() ? "..." : data.getInviteCode();
@@ -671,20 +660,10 @@ public class FamigliaScreen extends Screen {
                 Text.literal("Condividi questo codice con i tuoi compari!"),
                 px + W / 2, bodyY + 85, C_DIM);
 
-        UUID myUuid = MinecraftClient.getInstance().player != null
-                ? MinecraftClient.getInstance().player.getUuid() : null;
-        if (myUuid != null) {
-            for (FamigliaData.ClientMember m : data.getMembri()) {
-                if (m.playerUuid.equals(myUuid)) {
-                    ctx.drawText(textRenderer, Text.literal("Il tuo stato: "),
-                            px + PAD, bodyY + 105, C_DIM, false);
-                    ctx.drawText(textRenderer,
-                            Text.literal(m.stato.etichetta).withColor(m.stato.colore),
-                            px + PAD + textRenderer.getWidth("Il tuo stato: "), bodyY + 105, 0xFFFFFFFF, false);
-                    break;
-                }
-            }
-        }
+        // Show member count
+        ctx.drawText(textRenderer,
+                Text.literal("Membri: " + data.getMembri().size()),
+                px + PAD, bodyY + 105, C_DIM, false);
     }
 
     // ==========================================================================
@@ -693,7 +672,7 @@ public class FamigliaScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mx, double my, int btn) {
-        if (data.isInFamily() && tab == 0 && !membriEdit) {
+        if (data.isInFamily() && tab == 0 && !membriEdit && !membriAdd) {
             int listY = py + HEADER_H + TAB_H + 4 + 13;
             if (mx >= px + 2 && mx < px + W - 2) {
                 List<FamigliaData.ClientMember> ml = data.getMembri();
@@ -703,7 +682,7 @@ public class FamigliaScreen extends Screen {
                 }
             }
         }
-        if (data.isInFamily() && tab == 1 && !ruoliAdd && !ruoliEdit && data.isCreator()) {
+        if (data.isInFamily() && tab == 1 && !ruoliAdd && !ruoliEdit) {
             int listY = py + HEADER_H + TAB_H + 4 + 13;
             if (mx >= px + 2 && mx < px + W - 2) {
                 List<RuoloCustom> rl = data.getRuoli();
@@ -718,7 +697,7 @@ public class FamigliaScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double hAmt, double vAmt) {
-        if (data.isInFamily() && tab == 0 && !membriEdit) {
+        if (data.isInFamily() && tab == 0 && !membriEdit && !membriAdd) {
             membriScroll -= (int) Math.signum(vAmt);
             membriScroll  = Math.max(0, Math.min(membriScroll, Math.max(0, data.getMembri().size() - VR)));
             return true;
@@ -734,8 +713,8 @@ public class FamigliaScreen extends Screen {
     @Override
     public boolean keyPressed(int key, int scan, int mods) {
         if (key == 256) {
-            if (membriEdit || ruoliAdd || ruoliEdit) {
-                membriEdit = ruoliAdd = ruoliEdit = false;
+            if (membriEdit || membriAdd || ruoliAdd || ruoliEdit) {
+                membriEdit = membriAdd = ruoliAdd = ruoliEdit = false;
                 clearChildren(); init(); return true;
             }
             if (welcomeMode != WelcomeMode.NONE) {
@@ -751,12 +730,6 @@ public class FamigliaScreen extends Screen {
     // ==========================================================================
     // HELPERS
     // ==========================================================================
-
-    private void sendC2S(String action, String json) {
-        if (ClientPlayNetworking.canSend(FamigliaC2SPayload.ID)) {
-            ClientPlayNetworking.send(new FamigliaC2SPayload(action, json));
-        }
-    }
 
     private String escapeJson(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
