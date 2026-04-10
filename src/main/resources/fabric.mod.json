@@ -6,7 +6,7 @@
   "description": "Gestisci la tua famiglia nel roleplay mafioso.",
   "authors": ["devines"],
   "license": "MIT",
-  "environment": "client",
+  "environment": "*",
   "entrypoints": {
     "main": ["com.famiglia.mod.FamigliaMod"],
     "client": ["com.famiglia.mod.client.FamigliaClientMod"]

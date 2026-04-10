@@ -1,225 +1,179 @@
 package com.famiglia.mod.data;
 
-import com.google.gson.*;
-import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.texture.NativeImageBackedTexture;
-import net.minecraft.client.texture.NativeImage;
-import net.minecraft.util.Identifier;
 import com.famiglia.mod.FamigliaMod;
+import com.famiglia.mod.gui.FamigliaScreen;
+import com.google.gson.*;
+import net.minecraft.client.MinecraftClient;
 
-import java.io.*;
-import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
+/**
+ * Cache lato client dei dati della famiglia.
+ * Riceve gli aggiornamenti dal server tramite pacchetti S2C.
+ */
 public class FamigliaData {
 
     private static FamigliaData instance;
 
-    private List<Membro>      membri        = new ArrayList<>();
-    private List<RuoloCustom> ruoli         = new ArrayList<>();
-    private String            nomeFamiglia  = "La Famiglia";
-    private String            fotoNomeFile  = "";
+    // ── Family state ──────────────────────────────────────────────────────────
+    private boolean inFamily = false;
+    private String familyId = "";
+    private String familyName = "La Famiglia";
+    private String inviteCode = "";
+    private UUID creatorUuid = null;
 
-    private Identifier        fotoTextureId = null;
-    private boolean           fotoCaricata  = false;
+    private List<ClientMember> membri = new ArrayList<>();
+    private List<RuoloCustom> ruoli = new ArrayList<>();
 
-    private final Path configDir;
-    private final Path savePath;
+    // ── Error / notification state ────────────────────────────────────────────
+    private String lastError = "";
+    private long lastErrorTime = 0;
 
-    private FamigliaData() {
-        configDir = FabricLoader.getInstance().getConfigDir().resolve("famiglia");
-        savePath  = configDir.resolve("famiglia_data.json");
-        try { Files.createDirectories(configDir); } catch (Exception ignored) {}
-        carica();
-        if (ruoli.isEmpty())  ruoli  = RuoloCustom.defaults();
-        if (membri.isEmpty()) caricaDatiDemo();
-    }
+    private FamigliaData() {}
 
     public static synchronized FamigliaData getInstance() {
         if (instance == null) instance = new FamigliaData();
         return instance;
     }
 
-    // ── Getters / Setters ────────────────────────────────────────────────────
+    // ── Getters ───────────────────────────────────────────────────────────────
 
-    public List<Membro>      getMembri()              { return membri; }
-    public List<RuoloCustom> getRuoli()               { return ruoli; }
-    public String            getNomeFamiglia()        { return nomeFamiglia; }
-    public void              setNomeFamiglia(String n){ nomeFamiglia = n; salva(); }
-    public String            getFotoNomeFile()        { return fotoNomeFile; }
-    public Path              getConfigDir()           { return configDir; }
+    public boolean isInFamily()              { return inFamily; }
+    public String getFamilyId()              { return familyId; }
+    public String getNomeFamiglia()          { return familyName; }
+    public String getInviteCode()            { return inviteCode; }
+    public UUID getCreatorUuid()             { return creatorUuid; }
+    public List<ClientMember> getMembri()    { return membri; }
+    public List<RuoloCustom> getRuoli()      { return ruoli; }
 
-    public void setFotoNomeFile(String nome) {
-        this.fotoNomeFile  = nome;
-        this.fotoCaricata  = false;
-        this.fotoTextureId = null;
-        salva();
+    public boolean isCreator() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || creatorUuid == null) return false;
+        return client.player.getUuid().equals(creatorUuid);
     }
 
-    /** Carica e restituisce la texture foto; null se non disponibile. */
-    public Identifier getFotoTexture() {
-        if (fotoCaricata) return fotoTextureId;
-        fotoCaricata = true;
-        if (fotoNomeFile == null || fotoNomeFile.isBlank()) return null;
-        Path imgPath = configDir.resolve(fotoNomeFile);
-        if (!Files.exists(imgPath)) return null;
-        try (InputStream is = Files.newInputStream(imgPath)) {
-            NativeImage img = NativeImage.read(is);
-            NativeImageBackedTexture tex = new NativeImageBackedTexture(() -> "famiglia/foto_famiglia", img);
-            Identifier id = Identifier.of("famiglia", "foto_famiglia");
-            // Libera la texture precedente per evitare memory leak
-            if (fotoTextureId != null) {
-                MinecraftClient.getInstance().getTextureManager().destroyTexture(fotoTextureId);
-            }
-            MinecraftClient.getInstance().getTextureManager().registerTexture(id, tex);
-            fotoTextureId = id;
-        } catch (Exception e) {
-            FamigliaMod.LOGGER.error("Errore caricamento foto famiglia", e);
-            fotoTextureId = null;
-        }
-        return fotoTextureId;
+    public String getLastError() {
+        if (System.currentTimeMillis() - lastErrorTime > 5000) lastError = "";
+        return lastError;
     }
 
-    /** Lista di file PNG/JPG presenti in config/famiglia/ */
-    public List<String> getImmaginiDisponibili() {
-        List<String> list = new ArrayList<>();
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(configDir, p -> {
-            String n = p.getFileName().toString().toLowerCase();
-            return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg");
-        })) { for (Path p : ds) list.add(p.getFileName().toString()); }
-        catch (Exception ignored) {}
-        return list;
+    // ── Reset (on server join / disconnect) ───────────────────────────────────
+
+    public void reset() {
+        inFamily = false;
+        familyId = "";
+        familyName = "La Famiglia";
+        inviteCode = "";
+        creatorUuid = null;
+        membri.clear();
+        ruoli.clear();
+        lastError = "";
     }
 
-    // ── Membri ───────────────────────────────────────────────────────────────
+    // ── Handle S2C packets ────────────────────────────────────────────────────
 
-    public void aggiungiMembro(Membro m) { membri.add(m); salva(); }
-    public void rimuoviMembro(Membro m)  { membri.remove(m); salva(); }
-
-    // ── Ruoli ────────────────────────────────────────────────────────────────
-
-    public void aggiungiRuolo(RuoloCustom r) { ruoli.add(r); salva(); }
-    /** Rimuove un ruolo. Non permette di cancellare l'ultimo ruolo rimasto. */
-    public boolean rimuoviRuolo(RuoloCustom r) {
-        if (ruoli.size() <= 1) return false;
-        RuoloCustom fallback = ruoli.stream()
-            .filter(x -> x != r)
-            .findFirst()
-            .orElse(ruoli.get(0));
-        for (Membro m : membri) {
-            if (m.getRuolo() == r) m.setRuolo(fallback);
-        }
-        ruoli.remove(r);
-        salva();
-        return true;
-    }
-
-    // ── JSON ─────────────────────────────────────────────────────────────────
-
-    public void salva() {
+    public void handleS2C(String action, String jsonData) {
         try {
-            JsonObject root = new JsonObject();
-            root.addProperty("nomeFamiglia", nomeFamiglia);
-            root.addProperty("fotoNomeFile", fotoNomeFile);
-
-            JsonArray ra = new JsonArray();
-            for (RuoloCustom r : ruoli) {
-                JsonObject ro = new JsonObject();
-                ro.addProperty("nome",   r.getNome());
-                ro.addProperty("emoji",  r.getEmoji());
-                ro.addProperty("colore", r.getColore());
-                ra.add(ro);
+            switch (action) {
+                case "full_sync" -> handleFullSync(jsonData);
+                case "no_family" -> {
+                    inFamily = false;
+                    familyId = "";
+                    familyName = "La Famiglia";
+                    inviteCode = "";
+                    creatorUuid = null;
+                    membri.clear();
+                    ruoli.clear();
+                    refreshScreen();
+                }
+                case "invite_code" -> {
+                    JsonObject json = JsonParser.parseString(jsonData).getAsJsonObject();
+                    inviteCode = json.get("code").getAsString();
+                    refreshScreen();
+                }
+                case "error" -> {
+                    JsonObject json = JsonParser.parseString(jsonData).getAsJsonObject();
+                    lastError = json.get("message").getAsString();
+                    lastErrorTime = System.currentTimeMillis();
+                    refreshScreen();
+                }
+                default -> FamigliaMod.LOGGER.warn("Azione S2C sconosciuta: {}", action);
             }
-            root.add("ruoli", ra);
-
-            JsonArray ma = new JsonArray();
-            for (Membro m : membri) {
-                JsonObject mo = new JsonObject();
-                mo.addProperty("nome",         m.getNome());
-                mo.addProperty("ruoloNome",    m.getRuolo().getNome());
-                mo.addProperty("stato",        m.getStato().name());
-                mo.addProperty("nota",         m.getNota());
-                mo.addProperty("dataIngresso", m.getDataIngresso());
-                ma.add(mo);
-            }
-            root.add("membri", ma);
-
-            // Scrittura atomica: scrivi su file temporaneo e poi rinomina
-            Files.createDirectories(configDir);
-            Path tmpPath = configDir.resolve("famiglia_data.json.tmp");
-            try (Writer w = new FileWriter(tmpPath.toFile())) {
-                new GsonBuilder().setPrettyPrinting().create().toJson(root, w);
-            }
-            Files.move(tmpPath, savePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (Exception e) {
-            FamigliaMod.LOGGER.error("Errore salvataggio dati famiglia", e);
+            FamigliaMod.LOGGER.error("Errore gestione S2C: {} - {}", action, e.getMessage());
         }
     }
 
-    public void carica() {
-        if (!Files.exists(savePath)) return;
-        try (Reader r = new FileReader(savePath.toFile())) {
-            JsonObject root = JsonParser.parseReader(r).getAsJsonObject();
-            nomeFamiglia = root.has("nomeFamiglia") ? root.get("nomeFamiglia").getAsString() : "La Famiglia";
-            fotoNomeFile = root.has("fotoNomeFile") ? root.get("fotoNomeFile").getAsString() : "";
+    private void handleFullSync(String jsonData) {
+        try {
+            JsonObject root = JsonParser.parseString(jsonData).getAsJsonObject();
 
+            inFamily = true;
+            familyId = root.get("id").getAsString();
+            familyName = root.get("name").getAsString();
+            inviteCode = root.has("inviteCode") ? root.get("inviteCode").getAsString() : "";
+            creatorUuid = UUID.fromString(root.get("creatorUuid").getAsString());
+
+            // Parse ruoli
             ruoli.clear();
             if (root.has("ruoli")) {
                 for (JsonElement el : root.getAsJsonArray("ruoli")) {
                     try {
                         JsonObject ro = el.getAsJsonObject();
-                        ruoli.add(new RuoloCustom(ro.get("nome").getAsString(),
-                                                  ro.get("emoji").getAsString(),
-                                                  ro.get("colore").getAsInt()));
+                        ruoli.add(new RuoloCustom(
+                                ro.get("nome").getAsString(),
+                                ro.get("emoji").getAsString(),
+                                ro.get("colore").getAsInt()));
                     } catch (Exception e) {
-                        FamigliaMod.LOGGER.warn("Ruolo corrotto nel salvataggio, ignorato", e);
+                        FamigliaMod.LOGGER.warn("Ruolo corrotto nel sync, ignorato", e);
                     }
                 }
             }
+            if (ruoli.isEmpty()) ruoli = RuoloCustom.defaults();
 
+            // Parse membri
             membri.clear();
             if (root.has("membri")) {
                 for (JsonElement el : root.getAsJsonArray("membri")) {
                     try {
                         JsonObject mo = el.getAsJsonObject();
-                        String rn = mo.get("ruoloNome").getAsString();
-                        RuoloCustom ruolo = ruoli.stream()
-                            .filter(rx -> rx.getNome().equals(rn)).findFirst()
-                            .orElse(ruoli.isEmpty() ? new RuoloCustom("?", "❓", 0xFFFFFFFF) : ruoli.get(0));
-                        Membro m = new Membro(mo.get("nome").getAsString(), ruolo);
-                        m.setStato(Membro.Stato.valueOf(mo.get("stato").getAsString()));
-                        m.setNota(mo.has("nota") ? mo.get("nota").getAsString() : "");
-                        m.setDataIngresso(mo.has("dataIngresso") ? mo.get("dataIngresso").getAsLong() : System.currentTimeMillis());
+                        ClientMember m = new ClientMember();
+                        m.playerUuid = UUID.fromString(mo.get("uuid").getAsString());
+                        m.playerName = mo.get("playerName").getAsString();
+                        m.ruoloIndex = mo.get("ruoloIndex").getAsInt();
+                        m.stato = Membro.Stato.valueOf(mo.get("stato").getAsString());
+                        m.nota = mo.has("nota") ? mo.get("nota").getAsString() : "";
+                        m.dataIngresso = mo.has("dataIngresso") ? mo.get("dataIngresso").getAsLong() : 0;
+                        // Clamp ruoloIndex
+                        m.ruoloIndex = Math.min(m.ruoloIndex, Math.max(0, ruoli.size() - 1));
                         membri.add(m);
                     } catch (Exception e) {
-                        FamigliaMod.LOGGER.warn("Membro corrotto nel salvataggio, ignorato", e);
+                        FamigliaMod.LOGGER.warn("Membro corrotto nel sync, ignorato", e);
                     }
                 }
             }
+
+            refreshScreen();
         } catch (Exception e) {
-            FamigliaMod.LOGGER.error("Errore caricamento dati famiglia", e);
+            FamigliaMod.LOGGER.error("Errore parsing full_sync", e);
         }
     }
 
-    private void caricaDatiDemo() {
-        if (ruoli.isEmpty()) ruoli = RuoloCustom.defaults();
-        RuoloCustom[] r = ruoli.toArray(new RuoloCustom[0]);
-        if (r.length == 0) return;
-        addDemo("Don Salvatore",       r[0],                        Membro.Stato.IN_PIAZZA,   "Non si avvicina nessuno senza permesso");
-        addDemo("Ciro 'o Milionario",  r[Math.min(1, r.length-1)],  Membro.Stato.ONLINE,      "");
-        addDemo("Gennaro Savastano",   r[Math.min(2, r.length-1)],  Membro.Stato.IN_GUARDIA,  "Zona Vele");
-        addDemo("Tonino 'o Pazzo",     r[Math.min(3, r.length-1)],  Membro.Stato.ONLINE,      "");
-        addDemo("Pisellino",           r[Math.min(5, r.length-1)],  Membro.Stato.IN_GUARDIA,  "Tetto palazzina B");
-        addDemo("Enzuccio",            r[Math.min(4, r.length-1)],  Membro.Stato.IN_PIAZZA,   "Angolo via Toledo");
-        salva();
+    private void refreshScreen() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.currentScreen instanceof FamigliaScreen screen) {
+            screen.onDataUpdated();
+        }
     }
 
-    private void addDemo(String nome, RuoloCustom ruolo, Membro.Stato stato, String nota) {
-        Membro m = new Membro(nome, ruolo);
-        m.setStato(stato);
-        m.setNota(nota);
-        membri.add(m);
+    // ── Client member data class ──────────────────────────────────────────────
+
+    public static class ClientMember {
+        public UUID playerUuid;
+        public String playerName;
+        public int ruoloIndex;
+        public Membro.Stato stato;
+        public String nota;
+        public long dataIngresso;
     }
 }

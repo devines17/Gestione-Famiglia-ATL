@@ -1,30 +1,27 @@
 package com.famiglia.mod.client;
 
 import com.famiglia.mod.FamigliaMod;
+import com.famiglia.mod.data.FamigliaData;
 import com.famiglia.mod.gui.FamigliaScreen;
+import com.famiglia.mod.network.FamigliaC2SPayload;
+import com.famiglia.mod.network.FamigliaS2CPayload;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import org.lwjgl.glfw.GLFW;
 
 public class FamigliaClientMod implements ClientModInitializer {
 
-    /**
-     * Keybind esposta pubblicamente così la GUI può mostrarla nel tooltip.
-     * Il giocatore può cambiarla da:
-     *   Opzioni → Controlli → Famiglia Mod → Apri Pannello Famiglia
-     */
     public static KeyBinding openFamigliaKey;
 
     @Override
     public void onInitializeClient() {
 
         // ── Registrazione keybind ────────────────────────────────────────────
-        // "key.famiglia.open"       → chiave traduzione (it_it.json / en_us.json)
-        // "category.famiglia"       → categoria mostrata nelle opzioni controlli
-        // Default: F6, liberamente modificabile dal giocatore in-game
         openFamigliaKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.famiglia.open",
                 InputUtil.Type.KEYSYM,
@@ -34,17 +31,34 @@ public class FamigliaClientMod implements ClientModInitializer {
 
         // ── Tick listener ────────────────────────────────────────────────────
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            // wasPressed() consuma tutti i press accumulati tra i tick
             while (openFamigliaKey.wasPressed()) {
                 if (client.player != null) {
-                    // Alterna: se la GUI è già aperta la chiude, altrimenti la apre
                     if (client.currentScreen instanceof FamigliaScreen) {
                         client.setScreen(null);
                     } else {
+                        // Richiedi sync al server quando si apre la GUI
+                        if (ClientPlayNetworking.canSend(FamigliaC2SPayload.ID)) {
+                            ClientPlayNetworking.send(new FamigliaC2SPayload("request_sync", "{}"));
+                        }
                         client.setScreen(new FamigliaScreen());
                     }
                 }
             }
+        });
+
+        // ── Ricezione pacchetti S2C ──────────────────────────────────────────
+        ClientPlayNetworking.registerGlobalReceiver(FamigliaS2CPayload.ID,
+                (payload, context) -> {
+                    String action = payload.action();
+                    String jsonData = payload.jsonData();
+
+                    context.client().execute(() ->
+                            FamigliaData.getInstance().handleS2C(action, jsonData));
+                });
+
+        // ── Quando ci si connette a un server, richiedi sync ─────────────────
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            FamigliaData.getInstance().reset();
         });
 
         FamigliaMod.LOGGER.info("[Famiglia] Client inizializzato. Keybind default: F6");
