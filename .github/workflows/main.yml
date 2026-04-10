@@ -3,6 +3,12 @@ name: Build Mod
 on:
   push:
     branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -15,12 +21,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
 
-      - run: chmod +x gradlew
+      - uses: gradle/actions/wrapper-validation@v4
 
-      - run: ./gradlew build --stacktrace
+      - run: chmod +x gradlew && ./gradlew build --stacktrace --build-cache --parallel
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: mod-jar
           path: build/libs/*.jar
