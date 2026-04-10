@@ -4,6 +4,7 @@ import com.famiglia.mod.client.FamigliaClientMod;
 import com.famiglia.mod.data.FamigliaData;
 import com.famiglia.mod.data.Membro;
 import com.famiglia.mod.data.RuoloCustom;
+import net.minecraft.client.gl.RenderPipelines;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
@@ -565,7 +566,7 @@ public class FamigliaScreen extends Screen {
 
         Identifier tex = data.getFotoTexture();
         if (tex != null) {
-            ctx.drawTexture(tex, imgX, imgY, 0, 0, 64, 64, 64, 64);
+            ctx.drawTexture(RenderPipelines.GUI_TEXTURED, tex, imgX, imgY, 0, 0, 64, 64, 64, 64);
         } else {
             ctx.drawCenteredTextWithShadow(textRenderer,
                     Text.literal("Nessuna"), imgX + 32, imgY + 24, C_DIM);

@@ -67,8 +67,8 @@ public class FamigliaData {
         if (!Files.exists(imgPath)) return null;
         try (InputStream is = Files.newInputStream(imgPath)) {
             NativeImage img = NativeImage.read(is);
-            NativeImageBackedTexture tex = new NativeImageBackedTexture(img);
-            Identifier id = new Identifier("famiglia", "foto_famiglia");
+            NativeImageBackedTexture tex = new NativeImageBackedTexture(() -> "famiglia/foto_famiglia", img);
+            Identifier id = Identifier.of("famiglia", "foto_famiglia");
             // Libera la texture precedente per evitare memory leak
             if (fotoTextureId != null) {
                 MinecraftClient.getInstance().getTextureManager().destroyTexture(fotoTextureId);
