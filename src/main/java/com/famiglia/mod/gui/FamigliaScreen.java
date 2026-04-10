@@ -134,7 +134,7 @@ public class FamigliaScreen extends Screen {
 
             confirmCancel(btnY,
                 () -> {
-                    String nome = addNomeField.getText().trim();
+                    String nome = FamigliaData.sanitize(addNomeField.getText().trim());
                     List<RuoloCustom> r = data.getRuoli();
                     if (!nome.isEmpty() && !r.isEmpty())
                         data.aggiungiMembro(new Membro(nome, r.get(Math.min(addRuoloIdx, r.size()-1))));
@@ -167,7 +167,7 @@ public class FamigliaScreen extends Screen {
                     List<RuoloCustom> r = data.getRuoli();
                     if (!r.isEmpty()) m.setRuolo(r.get(Math.min(editRuoloIdx, r.size()-1)));
                     m.setStato(Membro.Stato.values()[editStatoIdx]);
-                    m.setNota(editNotaField.getText().trim());
+                    m.setNota(FamigliaData.sanitize(editNotaField.getText().trim()));
                     data.salva(); membriEdit = false; clearChildren(); init();
                 },
                 () -> { membriEdit = false; clearChildren(); init(); });
@@ -234,9 +234,9 @@ public class FamigliaScreen extends Screen {
 
             confirmCancel(btnY,
                 () -> {
-                    String nome  = ruoloNomeField.getText().trim();
-                    String emoji = ruoloEmojiField.getText().trim();
-                    String hex   = ruoloColoreField.getText().trim();
+                    String nome  = FamigliaData.sanitize(ruoloNomeField.getText().trim());
+                    String emoji = FamigliaData.sanitize(ruoloEmojiField.getText().trim());
+                    String hex   = FamigliaData.sanitize(ruoloColoreField.getText().trim());
                     if (nome.isEmpty()) { ruoliAdd = ruoliEdit = false; clearChildren(); init(); return; }
                     int colore;
                     try { colore = (int)(0xFF000000L | Long.parseLong(hex.replace("#",""), 16)); }
@@ -304,8 +304,8 @@ public class FamigliaScreen extends Screen {
 
         // Salva
         addDrawableChild(ButtonWidget.builder(Text.literal("✔ Salva"), btn -> {
-            data.setNomeFamiglia(famNomeField.getText().trim().isEmpty()
-                    ? "La Famiglia" : famNomeField.getText().trim());
+            String famName = FamigliaData.sanitize(famNomeField.getText().trim());
+            data.setNomeFamiglia(famName.isEmpty() ? "La Famiglia" : famName);
             if (!fotoList.isEmpty()) data.setFotoNomeFile(fotoList.get(fotoIdx));
             clearChildren(); init();
         }).dimensions(px + W - 80, py + H - 18, 72, 14).build());

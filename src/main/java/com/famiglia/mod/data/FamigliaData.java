@@ -1,5 +1,6 @@
 package com.famiglia.mod.data;
 
+import com.famiglia.mod.FamigliaMod;
 import com.google.gson.*;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
@@ -8,6 +9,7 @@ import net.minecraft.client.texture.NativeImage;
 import net.minecraft.util.Identifier;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,13 +32,15 @@ public class FamigliaData {
     private FamigliaData() {
         configDir = FabricLoader.getInstance().getConfigDir().resolve("famiglia");
         savePath  = configDir.resolve("famiglia_data.json");
-        try { Files.createDirectories(configDir); } catch (Exception ignored) {}
+        try { Files.createDirectories(configDir); } catch (Exception e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to create config directory", e);
+        }
         carica();
         if (ruoli.isEmpty())  ruoli  = RuoloCustom.defaults();
         if (membri.isEmpty()) caricaDatiDemo();
     }
 
-    public static FamigliaData getInstance() {
+    public static synchronized FamigliaData getInstance() {
         if (instance == null) instance = new FamigliaData();
         return instance;
     }
@@ -57,20 +61,45 @@ public class FamigliaData {
         salva();
     }
 
+    private static final long MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
+
     /** Carica e restituisce la texture foto; null se non disponibile. */
     public Identifier getFotoTexture() {
         if (fotoCaricata) return fotoTextureId;
         fotoCaricata = true;
         if (fotoNomeFile == null || fotoNomeFile.isBlank()) return null;
         Path imgPath = configDir.resolve(fotoNomeFile);
+        // Path traversal protection: ensure resolved path stays within configDir
+        try {
+            if (!imgPath.toRealPath().startsWith(configDir.toRealPath())) {
+                FamigliaMod.LOGGER.warn("[Famiglia] Blocked path traversal attempt: {}", fotoNomeFile);
+                return null;
+            }
+        } catch (IOException e) {
+            return null;
+        }
         if (!Files.exists(imgPath)) return null;
+        try {
+            long size = Files.size(imgPath);
+            if (size > MAX_IMAGE_SIZE) {
+                FamigliaMod.LOGGER.warn("[Famiglia] Image too large ({} bytes), max {} bytes: {}",
+                        size, MAX_IMAGE_SIZE, fotoNomeFile);
+                return null;
+            }
+        } catch (IOException e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to check image size", e);
+            return null;
+        }
         try (InputStream is = Files.newInputStream(imgPath)) {
             NativeImage img = NativeImage.read(is);
             NativeImageBackedTexture tex = new NativeImageBackedTexture(img);
             Identifier id = new Identifier("famiglia", "foto_famiglia");
             MinecraftClient.getInstance().getTextureManager().registerTexture(id, tex);
             fotoTextureId = id;
-        } catch (Exception e) { e.printStackTrace(); fotoTextureId = null; }
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to load family photo", e);
+            fotoTextureId = null;
+        }
         return fotoTextureId;
     }
 
@@ -81,7 +110,9 @@ public class FamigliaData {
             String n = p.getFileName().toString().toLowerCase();
             return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg");
         })) { for (Path p : ds) list.add(p.getFileName().toString()); }
-        catch (Exception ignored) {}
+        catch (Exception e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to list available images", e);
+        }
         return list;
     }
 
@@ -133,15 +164,17 @@ public class FamigliaData {
             root.add("membri", ma);
 
             Files.createDirectories(configDir);
-            try (Writer w = new FileWriter(savePath.toFile())) {
+            try (Writer w = Files.newBufferedWriter(savePath, StandardCharsets.UTF_8)) {
                 new GsonBuilder().setPrettyPrinting().create().toJson(root, w);
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to save family data", e);
+        }
     }
 
     public void carica() {
         if (!savePath.toFile().exists()) return;
-        try (Reader r = new FileReader(savePath.toFile())) {
+        try (Reader r = Files.newBufferedReader(savePath, StandardCharsets.UTF_8)) {
             JsonObject root = JsonParser.parseReader(r).getAsJsonObject();
             nomeFamiglia = root.has("nomeFamiglia") ? root.get("nomeFamiglia").getAsString() : "La Famiglia";
             fotoNomeFile = root.has("fotoNomeFile") ? root.get("fotoNomeFile").getAsString() : "";
@@ -165,13 +198,34 @@ public class FamigliaData {
                         .filter(rx -> rx.getNome().equals(rn)).findFirst()
                         .orElse(ruoli.isEmpty() ? new RuoloCustom("?","❓",0xFFFFFFFF) : ruoli.get(0));
                     Membro m = new Membro(mo.get("nome").getAsString(), ruolo);
-                    m.setStato(Membro.Stato.valueOf(mo.get("stato").getAsString()));
+                    try {
+                        m.setStato(Membro.Stato.valueOf(mo.get("stato").getAsString()));
+                    } catch (IllegalArgumentException e) {
+                        FamigliaMod.LOGGER.warn("[Famiglia] Unknown stato '{}', defaulting to OFFLINE",
+                                mo.get("stato").getAsString());
+                        m.setStato(Membro.Stato.OFFLINE);
+                    }
                     m.setNota(mo.get("nota").getAsString());
                     m.setDataIngresso(mo.get("dataIngresso").getAsLong());
                     membri.add(m);
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("[Famiglia] Failed to load family data", e);
+        }
+    }
+
+    /** Strips control characters (except common whitespace) from user input. */
+    public static String sanitize(String input) {
+        if (input == null) return "";
+        StringBuilder sb = new StringBuilder(input.length());
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '\0') continue; // strip null bytes
+            if (Character.isISOControl(c) && c != ' ' && c != '\t') continue;
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     private void caricaDatiDemo() {
