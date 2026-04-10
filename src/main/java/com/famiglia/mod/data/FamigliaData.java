@@ -6,6 +6,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.util.Identifier;
+import com.famiglia.mod.FamigliaMod;
 
 import java.io.*;
 import java.nio.file.*;
@@ -36,7 +37,7 @@ public class FamigliaData {
         if (membri.isEmpty()) caricaDatiDemo();
     }
 
-    public static FamigliaData getInstance() {
+    public static synchronized FamigliaData getInstance() {
         if (instance == null) instance = new FamigliaData();
         return instance;
     }
@@ -68,9 +69,16 @@ public class FamigliaData {
             NativeImage img = NativeImage.read(is);
             NativeImageBackedTexture tex = new NativeImageBackedTexture(img);
             Identifier id = new Identifier("famiglia", "foto_famiglia");
+            // Libera la texture precedente per evitare memory leak
+            if (fotoTextureId != null) {
+                MinecraftClient.getInstance().getTextureManager().destroyTexture(fotoTextureId);
+            }
             MinecraftClient.getInstance().getTextureManager().registerTexture(id, tex);
             fotoTextureId = id;
-        } catch (Exception e) { e.printStackTrace(); fotoTextureId = null; }
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("Errore caricamento foto famiglia", e);
+            fotoTextureId = null;
+        }
         return fotoTextureId;
     }
 
@@ -93,13 +101,19 @@ public class FamigliaData {
     // ── Ruoli ────────────────────────────────────────────────────────────────
 
     public void aggiungiRuolo(RuoloCustom r) { ruoli.add(r); salva(); }
-    public void rimuoviRuolo(RuoloCustom r)  {
-        RuoloCustom fallback = ruoli.size() > 1
-            ? ruoli.stream().filter(x -> x != r).findFirst().orElse(r)
-            : r;
-        for (Membro m : membri) if (m.getRuolo() == r) m.setRuolo(fallback);
+    /** Rimuove un ruolo. Non permette di cancellare l'ultimo ruolo rimasto. */
+    public boolean rimuoviRuolo(RuoloCustom r) {
+        if (ruoli.size() <= 1) return false;
+        RuoloCustom fallback = ruoli.stream()
+            .filter(x -> x != r)
+            .findFirst()
+            .orElse(ruoli.get(0));
+        for (Membro m : membri) {
+            if (m.getRuolo() == r) m.setRuolo(fallback);
+        }
         ruoli.remove(r);
         salva();
+        return true;
     }
 
     // ── JSON ─────────────────────────────────────────────────────────────────
@@ -132,15 +146,20 @@ public class FamigliaData {
             }
             root.add("membri", ma);
 
+            // Scrittura atomica: scrivi su file temporaneo e poi rinomina
             Files.createDirectories(configDir);
-            try (Writer w = new FileWriter(savePath.toFile())) {
+            Path tmpPath = configDir.resolve("famiglia_data.json.tmp");
+            try (Writer w = new FileWriter(tmpPath.toFile())) {
                 new GsonBuilder().setPrettyPrinting().create().toJson(root, w);
             }
-        } catch (Exception e) { e.printStackTrace(); }
+            Files.move(tmpPath, savePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("Errore salvataggio dati famiglia", e);
+        }
     }
 
     public void carica() {
-        if (!savePath.toFile().exists()) return;
+        if (!Files.exists(savePath)) return;
         try (Reader r = new FileReader(savePath.toFile())) {
             JsonObject root = JsonParser.parseReader(r).getAsJsonObject();
             nomeFamiglia = root.has("nomeFamiglia") ? root.get("nomeFamiglia").getAsString() : "La Famiglia";
@@ -149,45 +168,58 @@ public class FamigliaData {
             ruoli.clear();
             if (root.has("ruoli")) {
                 for (JsonElement el : root.getAsJsonArray("ruoli")) {
-                    JsonObject ro = el.getAsJsonObject();
-                    ruoli.add(new RuoloCustom(ro.get("nome").getAsString(),
-                                              ro.get("emoji").getAsString(),
-                                              ro.get("colore").getAsInt()));
+                    try {
+                        JsonObject ro = el.getAsJsonObject();
+                        ruoli.add(new RuoloCustom(ro.get("nome").getAsString(),
+                                                  ro.get("emoji").getAsString(),
+                                                  ro.get("colore").getAsInt()));
+                    } catch (Exception e) {
+                        FamigliaMod.LOGGER.warn("Ruolo corrotto nel salvataggio, ignorato", e);
+                    }
                 }
             }
 
             membri.clear();
             if (root.has("membri")) {
                 for (JsonElement el : root.getAsJsonArray("membri")) {
-                    JsonObject mo = el.getAsJsonObject();
-                    String rn = mo.get("ruoloNome").getAsString();
-                    RuoloCustom ruolo = ruoli.stream()
-                        .filter(rx -> rx.getNome().equals(rn)).findFirst()
-                        .orElse(ruoli.isEmpty() ? new RuoloCustom("?","❓",0xFFFFFFFF) : ruoli.get(0));
-                    Membro m = new Membro(mo.get("nome").getAsString(), ruolo);
-                    m.setStato(Membro.Stato.valueOf(mo.get("stato").getAsString()));
-                    m.setNota(mo.get("nota").getAsString());
-                    m.setDataIngresso(mo.get("dataIngresso").getAsLong());
-                    membri.add(m);
+                    try {
+                        JsonObject mo = el.getAsJsonObject();
+                        String rn = mo.get("ruoloNome").getAsString();
+                        RuoloCustom ruolo = ruoli.stream()
+                            .filter(rx -> rx.getNome().equals(rn)).findFirst()
+                            .orElse(ruoli.isEmpty() ? new RuoloCustom("?", "❓", 0xFFFFFFFF) : ruoli.get(0));
+                        Membro m = new Membro(mo.get("nome").getAsString(), ruolo);
+                        m.setStato(Membro.Stato.valueOf(mo.get("stato").getAsString()));
+                        m.setNota(mo.has("nota") ? mo.get("nota").getAsString() : "");
+                        m.setDataIngresso(mo.has("dataIngresso") ? mo.get("dataIngresso").getAsLong() : System.currentTimeMillis());
+                        membri.add(m);
+                    } catch (Exception e) {
+                        FamigliaMod.LOGGER.warn("Membro corrotto nel salvataggio, ignorato", e);
+                    }
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            FamigliaMod.LOGGER.error("Errore caricamento dati famiglia", e);
+        }
     }
 
     private void caricaDatiDemo() {
         if (ruoli.isEmpty()) ruoli = RuoloCustom.defaults();
         RuoloCustom[] r = ruoli.toArray(new RuoloCustom[0]);
-        addDemo("Don Salvatore",       r[0], Membro.Stato.IN_PIAZZA,  "Non si avvicina nessuno senza permesso");
-        addDemo("Ciro 'o Milionario",  r.length>1?r[1]:r[0], Membro.Stato.ONLINE, "");
-        addDemo("Gennaro Savastano",   r.length>2?r[2]:r[0], Membro.Stato.IN_GUARDIA, "Zona Vele");
-        addDemo("Tonino 'o Pazzo",     r.length>3?r[3]:r[0], Membro.Stato.ONLINE, "");
-        addDemo("Pisellino",           r.length>5?r[5]:r[0], Membro.Stato.IN_GUARDIA, "Tetto palazzina B");
-        addDemo("Enzuccio",            r.length>4?r[4]:r[0], Membro.Stato.IN_PIAZZA,  "Angolo via Toledo");
+        if (r.length == 0) return;
+        addDemo("Don Salvatore",       r[0],                        Membro.Stato.IN_PIAZZA,   "Non si avvicina nessuno senza permesso");
+        addDemo("Ciro 'o Milionario",  r[Math.min(1, r.length-1)],  Membro.Stato.ONLINE,      "");
+        addDemo("Gennaro Savastano",   r[Math.min(2, r.length-1)],  Membro.Stato.IN_GUARDIA,  "Zona Vele");
+        addDemo("Tonino 'o Pazzo",     r[Math.min(3, r.length-1)],  Membro.Stato.ONLINE,      "");
+        addDemo("Pisellino",           r[Math.min(5, r.length-1)],  Membro.Stato.IN_GUARDIA,  "Tetto palazzina B");
+        addDemo("Enzuccio",            r[Math.min(4, r.length-1)],  Membro.Stato.IN_PIAZZA,   "Angolo via Toledo");
         salva();
     }
 
     private void addDemo(String nome, RuoloCustom ruolo, Membro.Stato stato, String nota) {
         Membro m = new Membro(nome, ruolo);
-        m.setStato(stato); m.setNota(nota); membri.add(m);
+        m.setStato(stato);
+        m.setNota(nota);
+        membri.add(m);
     }
 }
