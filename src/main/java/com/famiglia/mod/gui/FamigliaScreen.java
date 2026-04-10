@@ -156,6 +156,8 @@ public class FamigliaScreen extends Screen {
                 String name = welcomeField.getText().trim();
                 if (name.isEmpty()) name = "La Famiglia";
                 data.createFamily(name);
+                // Apri una nuova istanza della GUI per evitare problemi con la lista widget
+                net.minecraft.client.MinecraftClient.getInstance().setScreen(new FamigliaScreen());
             }).dimensions(px + PAD, py + 140, 100, 16).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Indietro"), btn -> {
@@ -173,6 +175,7 @@ public class FamigliaScreen extends Screen {
                 String code = welcomeField.getText().trim().toUpperCase();
                 if (!code.isEmpty()) {
                     data.joinFamily(code);
+                    net.minecraft.client.MinecraftClient.getInstance().setScreen(new FamigliaScreen());
                 }
             }).dimensions(px + PAD, py + 140, 100, 16).build());
 
@@ -392,6 +395,7 @@ public class FamigliaScreen extends Screen {
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Lascia Famiglia"), btn -> {
             data.leaveFamily();
+            net.minecraft.client.MinecraftClient.getInstance().setScreen(new FamigliaScreen());
         }).dimensions(px + PAD, py + H - 22, 120, 16).build());
     }
 
